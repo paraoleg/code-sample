@@ -1,0 +1,152 @@
+variables:
+  MYSQL_DATA_DIR: '/var/lib/mysql'
+  MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+  MYSQL_DATABASE: ${MYSQL_DATABASE}
+  PORT: ${PORT}
+  MAIN_DOMAIN: ${MAIN_DOMAIN}
+
+before_script:
+  - rm -fr /var/www/html
+
+stages:
+  - build
+  - tests
+  - dev
+  - test
+  - live
+
+build_vendor:
+  stage: build
+  when: always
+  image:
+    name: hub.ci.gbksoft.net:5000/pub/nginx-alpine-node:14
+  artifacts:
+    untracked: true
+    paths:
+      - node_modules/
+    when: on_success
+    expire_in: 2 days
+  script:
+    - echo "===== Install dependencies ====="
+    - npm ci
+  tags:
+    - shared-cli
+
+lint:ts:
+  stage: tests
+  when: always
+  image:
+    name: hub.ci.gbksoft.net:5000/pub/nginx-alpine-node:14
+  script:
+    - echo "===== Run linter ====="
+    - npm run lint
+  dependencies:
+    - build_vendor
+  tags:
+    - shared-tests
+
+dev:review:
+  stage: dev
+  when: manual
+  image:
+    name: hub.ci.gbksoft.net:5000/pub/nginx-alpine-node:14
+  services:
+    - name: mysql:8.0.15
+      alias: mysql
+      command: ["--default-authentication-plugin=mysql_native_password"]
+  variables:
+    MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+    MYSQL_DATABASE: ${MYSQL_DATABASE}
+    PROXY_build_HTTPS: '443:3000'
+    PROXY_build_DOMAIN: dev-${MAIN_DOMAIN}
+    BUILD_URL: https://dev-${MAIN_DOMAIN}
+    APP_URL: https://dev-${MAIN_DOMAIN}
+    PORT: 3000
+  dependencies:
+    - build_vendor
+  script:
+    - echo "===== All services ====="
+    - cat /etc/hosts | grep '10.1.' | awk '{print $1" "$2;}'
+    - echo "Base project is up. DOMAIN - ${APP_URL}"
+    - echo "===== Build and Start node app ====="
+    - npm run build
+    - echo "Base project is up. DOMAIN - ${APP_URL}"
+    - cp .env.example .env
+    - npm run migration-run
+#    - npm run test
+    - npm run test:e2e
+#    - npm run seed:run
+    - npm run start:prod
+  except:
+    - master
+  environment:
+    name: dev-review/$CI_PROJECT_PATH_SLUG
+    url: $BUILD_URL
+  tags:
+    - shared-web
+
+test:review:
+  stage: test
+  when: manual
+  image:
+    name: gitlab.gbksoft.net:5005/int/images/node:14
+    entrypoint: ['']
+  before_script:
+    - echo 'APP_KEY=' > .env
+    - npm install
+  services:
+    - name: mysql:8.0.15
+      alias: mysql
+      command: [ "--default-authentication-plugin=mysql_native_password" ]
+  variables:
+    MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+    MYSQL_DATABASE: ${MYSQL_DATABASE}
+    PROXY_build_HTTPS: '443:3000'
+    PROXY_build_DOMAIN: test-${MAIN_DOMAIN}
+    APP_URL: https://test-${MAIN_DOMAIN}
+    PORT: 3000
+  script:
+    - echo "===== All services ====="
+    - cat /etc/hosts | grep '10.1.' | awk '{print $1" "$2;}'
+    - echo "===== Build and Start node app ====="
+    - npm run build
+    - echo "Base project is up. DOMAIN - ${APP_URL}"
+    - cp .env.example .env
+    - npm run migration-run
+    - npm run start:prod
+  dependencies:
+    - build_vendor
+  except:
+    - master
+  tags:
+    - shared-web
+
+live:review:
+  stage: live
+  when: manual
+  image:
+    name: gitlab.gbksoft.net:5005/int/images/node:14
+  before_script:
+    - echo 'APP_KEY=' > .env
+  services:
+    - name: mysql:8.0.15
+      alias: mysql
+      command: [ "--default-authentication-plugin=mysql_native_password" ]
+  variables:
+    PROXY_build_DOMAIN: live-${MAIN_DOMAIN}
+    APP_URL: https://live-${MAIN_DOMAIN}
+    PORT: ${PORT}
+  script:
+    - echo "===== All services ====="
+    - cat /etc/hosts | grep '10.1.' | awk '{print $1" "$2;}'
+    - echo "===== Build and Start node app ====="
+    - npm run build
+    - echo "Base project is up. DOMAIN - ${APP_URL}"
+    - npm i -g pm2
+    - cp .env.example .env
+    - npm run migration-run
+    - pm2 start ecosystem.config.js --env prodcution
+  only:
+    - master
+  tags:
+    - shared-web
